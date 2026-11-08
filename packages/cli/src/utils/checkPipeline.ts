@@ -15,6 +15,7 @@ import {
   beginCheckSnapshots,
   finishCheckSnapshots,
 } from "./checkSnapshotDirectory.js";
+import { mergeFontFindings, type FontFallbackFinding } from "./checkFonts.js";
 import { findingAtRoot, findingElementKey, groupSampledFindings } from "./checkFindings.js";
 import {
   MAX_FINDING_FRAME_TIMES,
@@ -618,6 +619,23 @@ async function collectGridSamples(
   );
   enter("samples");
   return collected;
+}
+
+const FONT_SAMPLES = 3;
+
+/** Text drawn in a fallback face, read at a few seeks spread across the film so late-entering text is covered. */
+async function auditFonts(
+  driver: CheckAuditDriver,
+  layoutSamples: number[],
+): Promise<FontFallbackFinding[]> {
+  const collect = driver.collectFontFallback;
+  if (!collect) return [];
+  const batches: FontFallbackFinding[][] = [];
+  for (const time of evenlyPicked(layoutSamples.length > 0 ? layoutSamples : [0], FONT_SAMPLES)) {
+    await driver.seekGeometry(time);
+    batches.push(await collect.call(driver, time));
+  }
+  return mergeFontFindings(batches);
 }
 
 function craftEnabled(driver: CheckAuditDriver, options: CheckOptions): boolean {
@@ -1663,6 +1681,7 @@ export async function runAuditGrid(
     contrastChecked: collected.contrastEntries.length,
     contrastPassed: contrast.passed,
     craft,
+    fontFindings: await auditFonts(analysing, grid.layoutSamples),
     screenshots: collected.screenshots,
     timings: {
       launchSettleMs: 0,
@@ -1913,6 +1932,7 @@ export function selectFindingCropRequests(report: CheckReport): CheckFindingCrop
     ...report.layout.findings,
     ...report.motion.findings,
     ...report.contrast.findings,
+    ...report.fonts.findings,
     ...report.runtime.findings,
   ];
   const requests: CheckFindingCropRequest[] = [];
@@ -2053,6 +2073,7 @@ function buildReport(
   const motionSection = section(motionFindings);
   const contrastSection = section(browser.contrastFindings);
   const craftSection = section<CraftFinding>(browser.craft.findings);
+  const fontsSection = section<FontFallbackFinding>(browser.fontFindings);
   const audioSection = section(audioFindings);
   const warningCount =
     lint.warningCount +
@@ -2061,7 +2082,8 @@ function buildReport(
     layout.warningCount +
     motionSection.warningCount +
     contrastSection.warningCount +
-    craftSection.warningCount;
+    craftSection.warningCount +
+    fontsSection.warningCount;
   const errorCount =
     lint.errorCount +
     audioSection.errorCount +
@@ -2069,7 +2091,8 @@ function buildReport(
     layout.errorCount +
     motionSection.errorCount +
     contrastSection.errorCount +
-    craftSection.errorCount;
+    craftSection.errorCount +
+    fontsSection.errorCount;
   // Craft findings are judgment calls a film may break on purpose, so --strict gates defects only.
   const strictWarningCount = warningCount - craftSection.warningCount;
   const report: CheckReport = {
@@ -2098,6 +2121,7 @@ function buildReport(
       step: browser.craft.step,
       samples: browser.craft.samples,
     },
+    fonts: fontsSection,
     audio: audioSection,
     hdr: { autoPromotion: hdrPromotion, inspection: hdrInspection },
     snapshots: {
@@ -2260,6 +2284,7 @@ function emptyBrowserResult(): CheckBrowserResult {
     contrastChecked: 0,
     contrastPassed: 0,
     craft: disabledCraft(),
+    fontFindings: [],
     screenshots: [],
     timings: {
       launchSettleMs: 0,
